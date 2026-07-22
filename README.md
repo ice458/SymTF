@@ -17,8 +17,8 @@ It runs a Python engine powered by SymPy via Pyodide in a Web Worker, performing
 
 ## Usage
 
-You can use the live version hosted on GitHub Pages:
-**[Launch SymTF](https://ice458.github.io/SymTF/)** (or via the portfolio link [ice458.github.io/tools/SymTF/](https://ice458.github.io/tools/SymTF/))
+You can use the live version hosted here:
+**[Launch SymTF](https://ice458.github.io/tools/SymTF/)**
 
 ## Development
 
