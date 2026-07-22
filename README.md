@@ -1,5 +1,7 @@
 # SymTF - Symbolic Circuit Analyzer
 
+![SymTF Screenshot](SymTF.png)
+
 SymTF is a web-based symbolic circuit analyzer that allows you to draw analog circuits and symbolically derive their transfer functions $H(s)$ entirely within the browser. 
 
 It runs a Python engine powered by SymPy via Pyodide in a Web Worker, performing Modified Nodal Analysis (MNA) to derive the exact symbolic equations without requiring a backend server.
