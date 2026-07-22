@@ -21,7 +21,7 @@ globalThis.Konva = new Proxy({}, {
   }
 });
 
-(0, eval)(read("./schematic.js") + `
+(0, eval)(read("../schematic.js") + `
 globalThis.absPins = absPins;
 globalThis.isStrictlyInside = isStrictlyInside;
 // Headless layers/stage so setModel's render path runs.
@@ -31,8 +31,8 @@ globalThis.isStrictlyInside = isStrictlyInside;
   stage = { container: () => ({ style: {} }) };
 }
 `);
-(0, eval)(read("./netlist.js"));
-(0, eval)(read("./samples.js"));
+(0, eval)(read("../netlist.js"));
+(0, eval)(read("../samples.js"));
 
 // What the browser does with a sample: setModel normalizes the wires (merging,
 // cutting shorts through bodies) before anything is extracted. Testing the raw

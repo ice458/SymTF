@@ -4,7 +4,7 @@
 // schematic.js is a plain browser script, so it is loaded by eval rather than
 // import. That is also the point of the model/render split: everything tested
 // below runs with no Konva and no DOM.
-const src = Deno.readTextFileSync(new URL("./schematic.js", import.meta.url));
+const src = Deno.readTextFileSync(new URL("../schematic.js", import.meta.url));
 
 // Stubs only for what the file touches at load time.
 globalThis.window = globalThis;
@@ -496,7 +496,7 @@ eq("normalize keeps the component selection", [...t.selections.comps], [1]);
 // The samples ship as the first thing a visitor sees, so their labels must be
 // legible -- this exact bug shipped in rc_lpf.
 {
-  const samplesSrc = Deno.readTextFileSync(new URL("./samples.js", import.meta.url));
+  const samplesSrc = Deno.readTextFileSync(new URL("../samples.js", import.meta.url));
   (0, eval)(samplesSrc);
   for (const [key, sample] of Object.entries(globalThis.Samples)) {
     const { components, wires } = sample.model;

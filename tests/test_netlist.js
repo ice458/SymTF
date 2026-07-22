@@ -2,8 +2,8 @@
 // Tests for M8a: Netlist Extraction
 // Run with: deno run --allow-read test_netlist.js
 
-const src1 = Deno.readTextFileSync(new URL("./schematic.js", import.meta.url));
-const src2 = Deno.readTextFileSync(new URL("./netlist.js", import.meta.url));
+const src1 = Deno.readTextFileSync(new URL("../schematic.js", import.meta.url));
+const src2 = Deno.readTextFileSync(new URL("../netlist.js", import.meta.url));
 
 globalThis.window = globalThis;
 globalThis.document = { addEventListener() {}, querySelector: () => null, querySelectorAll: () => [], getElementById: () => null };
