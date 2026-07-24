@@ -6,10 +6,10 @@
 // Run with: deno run --allow-read test_dom.js
 
 const read = (f) => Deno.readTextFileSync(new URL(f, import.meta.url));
-const html = read("./index.html");
+const html = read("../index.html");
 const htmlIds = new Set([...html.matchAll(/id="([^"]+)"/g)].map(m => m[1]));
 
-const SOURCES = ["./app.js", "./schematic.js", "./netlist.js", "./samples.js", "./pyodide_bridge.js"];
+const SOURCES = ["../app.js", "../schematic.js", "../netlist.js", "../samples.js", "../pyodide_bridge.js"];
 let failures = 0;
 const fail = (msg) => { console.log("FAIL " + msg); failures++; };
 
@@ -37,7 +37,7 @@ for (const m of html.matchAll(/<script src="([^"]+?)(?:\?[^"]*)?"/g)) {
   // Site-root paths ("/consent.js") resolve against the deployed site, not this
   // folder, so there is nothing here to check them against.
   if (src.startsWith("http") || src.startsWith("/")) continue;
-  try { read("./" + src); } catch { fail(`index.html loads "${src}", which does not exist`); }
+  try { read("../" + src); } catch { fail(`index.html loads "${src}", which does not exist`); }
 }
 
 // The right pane's tabs are driven by [data-tab]; each needs its panel.
