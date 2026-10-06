@@ -28,7 +28,7 @@ let numericSymbols = [];
 const _solveCache = new Map();
 const _SOLVE_CACHE_MAX = 8;
 
-async function solveCircuitCached(circuitJson) {
+async function solveCircuitCached(circuitJson, tag = null) {
     const key = JSON.stringify(circuitJson);
     const hit = _solveCache.get(key);
     if (hit) {
@@ -36,7 +36,7 @@ async function solveCircuitCached(circuitJson) {
         _solveCache.set(key, hit);
         return hit;
     }
-    const result = await Bridge.solveCircuit(circuitJson);
+    const result = await Bridge.solveCircuit(circuitJson, tag);
     if (result.ok || result.reason === 'too_large') {
         _solveCache.set(key, result);
         while (_solveCache.size > _SOLVE_CACHE_MAX) {
@@ -51,6 +51,9 @@ const els = {
     engineStatus: document.getElementById('engine-status'),
     engineStatusText: document.getElementById('engine-status-text'),
     engineCancelBtn: document.getElementById('engine-cancel-btn'),
+    analyzeBtn: document.getElementById('analyze-btn'),
+    autoAnalyzeToggle: document.getElementById('auto-analyze-toggle'),
+    staleNote: document.getElementById('stale-note'),
     shareBtn: document.getElementById('share-btn'),
     schematicSampleSelect: document.getElementById('schematic-sample-select'),
     schematicClearBtn: document.getElementById('schematic-clear-btn'),
@@ -116,6 +119,7 @@ const els = {
     bodePlots: document.getElementById('bode-plots'),
     nyquistPlots: document.getElementById('nyquist-plots'),
     bodeReadout: document.getElementById('bode-readout'),
+    plotError: document.getElementById('plot-error'),
     compareReadout: document.getElementById('compare-readout'),
 
     // Approximation
@@ -212,18 +216,90 @@ function setEngineStatus(state, text) {
     els.engineStatusText.textContent = text;
 }
 
+// Auto mode (default on): edits, port changes and value-driven numeric solves
+// start the engine by themselves. Off: nothing heavy starts until the Analyze
+// button is pressed -- for circuits where every solve takes a while. Live
+// substitution and plotting of an existing result stay automatic either way;
+// they only re-use an H(s) that is already on screen.
+const AUTO_KEY = 'symtf.autoAnalyze';
+let autoAnalyze = true;
+try { autoAnalyze = localStorage.getItem(AUTO_KEY) !== '0'; } catch (e) { /* storage blocked */ }
+
+// The problem (solveKey) of the main solve the engine is working on, and the
+// one the user cancelled. Auto-analysis never re-launches the cancelled
+// problem by itself -- an unrelated edit followed by undo would otherwise
+// restart the exact computation the user just stopped. Analyze still runs it.
+let inFlightKey = null;
+let cancelledKey = null;
+
+// The result on screen no longer matches the circuit (auto is off, or a
+// computation was cancelled). Says so above H(s) until the next fresh result.
+function markStale(msg) {
+    if (!els.staleNote) return;
+    els.staleNote.textContent = msg;
+    els.staleNote.classList.remove('hidden');
+    els.analyzeBtn?.classList.add('attention');
+}
+function clearStale() {
+    els.staleNote?.classList.add('hidden');
+    els.analyzeBtn?.classList.remove('attention');
+}
+
+// Every automatic trigger goes through here, so the Auto switch is honoured in
+// one place.
+function autoAnalyzeSchematic() {
+    if (!engineReady) return;
+    if (!autoAnalyze) {
+        if (hasAnalyzed) markStale('Circuit changed — press Analyze to update the results.');
+        return;
+    }
+    analyzeSchematic(true);
+}
+
+function setAutoAnalyze(on) {
+    autoAnalyze = on;
+    try { localStorage.setItem(AUTO_KEY, on ? '1' : '0'); } catch (e) { /* ignore */ }
+    if (els.autoAnalyzeToggle) els.autoAnalyzeToggle.checked = on;
+    // Turning auto back on catches up with whatever changed while it was off.
+    if (on && engineReady) {
+        analyzeSchematic(true).then(() => { if (numericMode) maybeRunNumericSolve(); });
+    }
+}
+if (els.autoAnalyzeToggle) {
+    els.autoAnalyzeToggle.checked = autoAnalyze;
+    els.autoAnalyzeToggle.addEventListener('change', (e) => setAutoAnalyze(e.target.checked));
+}
+
+// Explicit Analyze: always runs, with errors shown, even for a circuit whose
+// result is already on screen or whose solve was cancelled -- it re-derives
+// H(s), re-applies the values and re-plots. Cheap when nothing changed (the
+// solve cache answers).
+els.analyzeBtn?.addEventListener('click', () => {
+    els.analyzeBtn.blur();
+    if (!engineReady) return;
+    cancelledKey = null;
+    analyzeSchematic(false, true);
+});
+
 Bridge.onInitComplete = (isRestart) => {
     engineReady = true;
+    if (els.analyzeBtn) els.analyzeBtn.disabled = false;
     setEngineStatus('ready', 'SymPy ready');
     // After a user cancel the worker restarts; re-analysing here would
     // immediately re-launch the very computation that was just cancelled.
+    // Calls made while it restarted were queued and run now on their own.
     if (isRestart) return;
     // The circuit is already on screen (the editor does not wait for SymPy), so
     // analyse it right away: opening the page ends with H(s) visible, no click.
     // Silent -- a half-drawn restored circuit just doesn't produce a result yet.
     // Success sets hasAnalyzed, which turns on auto-refresh for later edits, so
-    // from here the whole pipeline is automatic.
-    analyzeSchematic(true);
+    // from here the whole pipeline is automatic. With Auto off, wait for the
+    // button instead (a restored circuit may be the slow one).
+    if (autoAnalyze) {
+        analyzeSchematic(true);
+    } else {
+        els.resultPlaceholder.textContent = 'Auto analysis is off — press Analyze.';
+    }
 };
 
 Bridge.onInitFailed = (err) => {
@@ -236,7 +312,8 @@ Bridge.onInitFailed = (err) => {
 // grows without bound. The status chip doubles as that indicator, and the
 // Cancel button appears only while something is actually running.
 Bridge.onBusyChange = (busyCount) => {
-    if (!engineReady) return;   // init progress owns the chip until ready
+    // Init (or a restart after Cancel) owns the chip until the worker is up.
+    if (!engineReady || !Bridge.isReady) return;
     if (busyCount > 0) {
         setEngineStatus('busy', 'Computing…');
         els.engineCancelBtn?.classList.remove('hidden');
@@ -254,13 +331,28 @@ Bridge.onBusyChange = (busyCount) => {
 // exactly what this does.) Fast structural guards in the engine still reject a
 // genuinely explosive symbolic solve in well under a second and route it to
 // numeric mode -- that is prediction, not a timeout, so it stays.
+//
+// After a cancel the app stays usable: engineReady stays true, and anything
+// requested while the worker restarts simply waits for it. What was on screen
+// is left there but flagged as possibly out of date, and the cancelled problem
+// is not re-launched automatically (see cancelledKey) -- Analyze does that.
 els.engineCancelBtn?.addEventListener('click', () => {
+    if (inFlightKey) cancelledKey = inFlightKey;
+    inFlightKey = null;
+    lastSolvedKey = null;   // force the next Analyze / edit to really solve
+    // Every pending call is about to resolve as cancelled; drop any debounced
+    // follow-ups too so nothing fires straight into the restarting engine.
+    clearTimeout(reanalyzeTimer);
+    clearTimeout(subsLiveTimer);
+    clearTimeout(plotTimer);
     Bridge.cancel();
-    engineReady = false;
-    lastSolvedKey = null;
-    _solveCache.clear();   // results from the terminated worker are moot
     els.engineCancelBtn.classList.add('hidden');
     setEngineStatus('loading', 'Cancelled — restarting engine…');
+    if (hasAnalyzed || numericMode) {
+        markStale('Computation cancelled — the results shown may be out of date. Press Analyze to recompute.');
+    } else {
+        els.resultPlaceholder.textContent = 'Computation cancelled — press Analyze to run it again.';
+    }
 });
 
 // --- Persistence -----------------------------------------------------------
@@ -442,7 +534,8 @@ let inputKind = 'V';
 document.querySelectorAll('input[name="input-kind"]').forEach(r =>
     r.addEventListener('change', () => {
         inputKind = document.querySelector('input[name="input-kind"]:checked').value;
-        analyzeSchematic(true);
+        updateNetlistPreview();
+        autoAnalyzeSchematic();
     })
 );
 
@@ -485,14 +578,14 @@ els.copyNetlistBtn?.addEventListener('click', async () => {
 
 // Changing a port changes the question being asked, so re-analyse right away
 // (updateNetlistPreview runs inside analyzeSchematic).
-els.inputSource.addEventListener('change', () => analyzeSchematic(true));
-els.outputNode.addEventListener('change', () => analyzeSchematic(true));
+els.inputSource.addEventListener('change', () => { updateNetlistPreview(); autoAnalyzeSchematic(); });
+els.outputNode.addEventListener('change', () => { updateNetlistPreview(); autoAnalyzeSchematic(); });
 
 // Runs the whole schematic -> H(s) path. `silent` is the auto-refresh mode: it
 // suppresses the error banners and placeholder changes a manual click makes, so
 // re-analysing after an edit never nags mid-drawing -- it just updates or quietly
 // does nothing.
-async function analyzeSchematic(silent = false) {
+async function analyzeSchematic(silent = false, force = false) {
     // The schematic is the only input path now; the Netlist tab is a view.
     // updateNetlistPreview is the one place that extracts, writes the preview,
     // and sets the gate + error box -- reuse it so the click cannot disagree
@@ -524,10 +617,20 @@ async function analyzeSchematic(silent = false) {
     // moves that leave the netlist identical. Re-solving those wastes seconds
     // of SymPy time for a result already on screen -- skip when nothing the
     // engine sees has changed.
-    if (silent && solveKey(inputName, outNode) === lastSolvedKey) return;
+    const key = solveKey(inputName, outNode);
+    if (!force && silent && key === lastSolvedKey) {
+        // The result on screen is this circuit's (e.g. an edit was undone).
+        if (!numericMode) clearStale();
+        return;
+    }
+    // Never auto-restart a computation the user cancelled (Analyze clears this).
+    if (!force && key === cancelledKey) {
+        markStale('Computation cancelled — press Analyze to run it again.');
+        return;
+    }
 
-    await handleNetlistChange();         // engine parse -> currentCircuitJson
-    if (analyzeBlocked) return;          // engine rejected the netlist
+    const parsed = await handleNetlistChange();   // engine parse -> currentCircuitJson
+    if (!parsed || analyzeBlocked) return;        // rejected, cancelled or superseded
 
     runAnalysis({ kind: inputKind, name: inputName }, { node: outNode }, silent).catch(() => {});
 }
@@ -673,6 +776,10 @@ async function computeImpedance() {
     els.computeImpedanceBtn.disabled = true;
     try {
         const result = await Bridge.solveCircuit(circuit);
+        if (result.cancelled) {
+            setImpedanceError('Cancelled.');
+            return;
+        }
         if (!result.ok) {
             setImpedanceError('Impedance solve failed: ' + (result.errors || []).join('; '));
             return;
@@ -706,7 +813,7 @@ document.addEventListener('schematicChange', () => {
     // values are preserved across the refresh (see populateSubstitutionTable).
     if (hasAnalyzed && engineReady) {
         clearTimeout(reanalyzeTimer);
-        reanalyzeTimer = setTimeout(() => analyzeSchematic(true), 500);
+        reanalyzeTimer = setTimeout(autoAnalyzeSchematic, 500);
     }
 });
 let reanalyzeTimer = null;
@@ -767,6 +874,12 @@ els.subsTbody.addEventListener('input', (e) => {
         subsLiveTimer = setTimeout(() => {
             // In numeric-first mode there is no symbolic H(s) to substitute
             // into; the values drive a numeric re-solve instead.
+            // A numeric re-solve is a full solve, so it follows the Auto switch;
+            // substitution into an H(s) already on screen is always live.
+            if (numericMode && !autoAnalyze) {
+                markStale('Values changed — press Analyze (or "Solve harder") to re-solve.');
+                return;
+            }
             const fn = numericMode ? maybeRunNumericSolve : applySubstitution;
             try { fn(); } catch (err) { showGlobalError('UI Error: ' + err.message); }
         }, 350);
@@ -861,22 +974,25 @@ function hideGlobalError() {
 // does not touch the port dropdowns: those are built from the schematic's
 // labels by syncSchematicIoOptions, and having this rebuild them too meant two
 // systems overwriting the same <select> in turn.
+// Resolves true when currentCircuitJson now holds this netlist.
 async function handleNetlistChange() {
-    if (!engineReady) return;
+    if (!engineReady) return false;
 
     const text = els.netlistInput.value.trim();
     if (!text) {
         setParseError("Draw a circuit to analyze.");
         analyzeBlocked = true;
-        return;
+        return false;
     }
 
     const result = await Bridge.parseNetlist(text);
 
+    // Cancelled: not a verdict on the netlist, so leave the gate alone.
+    if (result.cancelled) return false;
     if (!result.ok) {
         setParseError(result.errors);
         analyzeBlocked = true;
-        return;
+        return false;
     }
 
     hideParseError();
@@ -885,9 +1001,11 @@ async function handleNetlistChange() {
     try {
         currentCircuitJson = JSON.parse(result.circuit_json);
         analyzeBlocked = false;
+        return true;
     } catch (e) {
         setParseError("Failed to parse circuit JSON internally.");
         analyzeBlocked = true;
+        return false;
     }
 }
 
@@ -960,10 +1078,12 @@ async function runAnalysis(forceInput = null, forceOutput = null, silent = false
     // too-large verdict come back with the result below.
     const key = solveKey(inName, outNode);
     const seq = ++solveSeq;
-    const result = await solveCircuitCached(currentCircuitJson);
+    inFlightKey = key;
+    const result = await solveCircuitCached(currentCircuitJson, 'solve');
+    if (inFlightKey === key && seq === solveSeq) inFlightKey = null;
 
     // A newer solve was issued while this one ran: its result owns the screen.
-    if (seq !== solveSeq) throw new Error("Superseded by a newer analysis");
+    if (seq !== solveSeq || result.superseded) throw new Error("Superseded by a newer analysis");
 
     if (!result.ok) {
         lastSolvedKey = null;
@@ -971,6 +1091,8 @@ async function runAnalysis(forceInput = null, forceOutput = null, silent = false
         // path. This is a normal outcome for big filters, not an error to throw.
         if (result.reason === 'too_large') {
             hasAnalyzed = true;
+            lastSolvedKey = key;
+            clearStale();
             enterNumericMode(result.symbols || [], result.errors || []);
             return null;
         }
@@ -978,7 +1100,7 @@ async function runAnalysis(forceInput = null, forceOutput = null, silent = false
         // the engine chip ("Cancelled — restarting engine…"); surfacing the
         // same event here too, worded as "Analysis: Cancelled", reads like a
         // failure for something the user explicitly asked for.
-        if (result.errors.length === 1 && result.errors[0] === 'Cancelled') {
+        if (result.cancelled) {
             throw new Error("Cancelled");
         }
         // With no Analyze button there is no manual retry, so solve
@@ -992,6 +1114,7 @@ async function runAnalysis(forceInput = null, forceOutput = null, silent = false
     numericMode = false;  // a symbolic result supersedes any numeric-first state
     els.solveLongBtn?.classList.add('hidden');
     lastSolvedKey = key;
+    clearStale();
     if (result.errors && result.errors.length > 0) {
         setParseError(result.errors.map(m => "Analysis: " + m));
     } else {
@@ -1012,6 +1135,9 @@ async function runAnalysis(forceInput = null, forceOutput = null, silent = false
 // changed or cleared later without re-analysing. The value fields are built
 // once here, from the full symbol list, and persist.
 function renderResults(tf) {
+    // A substitution still in flight was computed on the previous H(s); its
+    // result must not land on top of this one (it re-plotted the old circuit).
+    subsSeq++;
     currentTf = tf;
     currentSubstitutedTf = tf;
     currentApproxTf = null;
@@ -1044,6 +1170,7 @@ function renderResults(tf) {
 // which values are still needed), so the fields appear even though there is no
 // symbolic transfer function to substitute into.
 function enterNumericMode(symbols, errors) {
+    subsSeq++;
     numericMode = true;
     numericSymbols = symbols;
     currentTf = null;
@@ -1122,11 +1249,12 @@ async function maybeRunNumericSolve(effort = 'quick') {
     const seq = ++solveSeq;
     let result;
     try {
-        result = await solveCircuitCached(circuit);
+        result = await solveCircuitCached(circuit, 'solve');
     } catch (e) {
         return;
     }
-    if (seq !== solveSeq) return;
+    if (seq !== solveSeq || result.superseded) return;
+    if (result.cancelled) return;   // the header chip and stale note say it
     if (!result.ok) {
         if (result.reason === 'too_large') {
             setSubsError((result.errors || []).join(' ') +
@@ -1140,6 +1268,8 @@ async function maybeRunNumericSolve(effort = 'quick') {
     }
     clearSubsError();
     hideParseError();
+    clearStale();
+    subsSeq++;
     currentTf = result.tf;
     currentSubstitutedTf = result.tf;
     isFullyNumeric = (result.tf.symbols.length === 0);
@@ -1618,9 +1748,9 @@ async function applySubstitution() {
     }
 
     const seq = ++subsSeq;
-    const result = await Bridge.substitute(currentTf, subsMap);
+    const result = await Bridge.substitute(currentTf, subsMap, 'subs');
     // Keystrokes can outrun the worker; only the newest substitution renders.
-    if (seq !== subsSeq) return;
+    if (seq !== subsSeq || result.superseded || result.cancelled) return;
     if (!result.ok) {
         setSubsError(result.errors.join('; '));
         return;
@@ -1636,6 +1766,8 @@ async function applySubstitution() {
 // --- M3: Plotting Logic ---
 
 function updatePlotTabState() {
+    // Whatever is plotted (or about to be) belongs to the previous state.
+    clearPlotError();
     if (isFullyNumeric) {
         els.plotWarning.classList.add('hidden');
         els.plotConfigContainer.classList.remove('hidden');
@@ -1643,9 +1775,22 @@ function updatePlotTabState() {
         // typing a value flow straight through to the curve with no button.
         schedulePlot();
     } else {
+        // Not plottable any more: drop any pending/in-flight plot so a curve
+        // of the previous H(s) cannot land after this.
+        clearTimeout(plotTimer);
+        plotSeq++;
         els.plotWarning.classList.remove('hidden');
         els.plotConfigContainer.classList.add('hidden');
     }
+}
+
+function setPlotError(msg) {
+    if (!els.plotError) return;
+    els.plotError.textContent = msg;
+    els.plotError.classList.remove('hidden');
+}
+function clearPlotError() {
+    els.plotError?.classList.add('hidden');
 }
 
 // Redraws the plot from the current tf and range settings. There is no Plot
@@ -1669,10 +1814,21 @@ async function handlePlotting() {
     try {
         const tf = currentSubstitutedTf;
         const seq = ++plotSeq;
-        const result = await Bridge.freqResponse(tf, range);
-        if (seq !== plotSeq) return;   // a newer plot request superseded this one
-        if (result.ok) renderPlotly(result.data, tf.kind);
-        else console.warn('freq_response:', result.errors);
+        const result = await Bridge.freqResponse(tf, range, 'plot');
+        // A newer plot request superseded this one.
+        if (seq !== plotSeq || result.superseded) return;
+        if (result.ok) {
+            clearPlotError();
+            renderPlotly(result.data, tf.kind);
+        } else if (result.cancelled) {
+            setPlotError('Plot cancelled — the curve below may be out of date.');
+        } else {
+            // Leaving the previous curve up with no word made it look like the
+            // plot had simply stopped updating.
+            console.warn('freq_response:', result.errors);
+            setPlotError('Could not plot: ' + (result.errors || []).join('; ') +
+                ' — the curve below may be out of date.');
+        }
     } catch (e) {
         console.warn('plot error:', e);
     }
@@ -1798,7 +1954,9 @@ function linkFrequencyZoom(...ids) {
         }
         if (!upd) return;
         syncing = true;
-        Promise.all(others.map(n => Plotly.relayout(n, upd))).then(() => { syncing = false; });
+        // allSettled: one rejected relayout (e.g. a plot replaced mid-zoom)
+        // must not leave `syncing` stuck true, which silently ended syncing.
+        Promise.allSettled(others.map(n => Plotly.relayout(n, upd))).then(() => { syncing = false; });
     };
 
     nodes.forEach((node, i) => {

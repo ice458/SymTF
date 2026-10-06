@@ -1395,3 +1395,33 @@ body.schematic-full .left-pane {
     opacity: 1;
 }
 
+
+/* --- Analyze button + Auto switch (header) --- */
+.auto-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+}
+.auto-toggle input { margin: 0; cursor: pointer; }
+
+/* The result on screen is out of date (Auto off, or a cancelled run): the
+   Analyze button is the way to refresh it, so draw the eye there. */
+#analyze-btn.attention {
+    box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.stale-note {
+    font-size: 0.8rem;
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: 6px;
+    padding: 0.35rem 0.6rem;
+    margin-bottom: 0.5rem;
+}
+
+#plot-error { margin-bottom: 0.5rem; }
