@@ -82,6 +82,7 @@ const els = {
     denDegreeBadge: document.getElementById('den-degree-badge'),
     latexOutput: document.getElementById('latex-output'),
     toggleCoeffsBtn: document.getElementById('toggle-coeffs-btn'),
+    copyTexBtn: document.getElementById('copy-tex-btn'),
     toggleFlatBtn: document.getElementById('toggle-flat-btn'),
     toggleStdBtn: document.getElementById('toggle-std-btn'),
     coeffsContainer: document.getElementById('coeffs-container'),
@@ -738,6 +739,7 @@ function clearImpedanceError() {
     els.impedanceError.classList.add('hidden');
 }
 
+let impedanceSeq = 0;
 async function computeImpedance() {
     if (!currentCircuitJson || !currentCircuitJson.elements) {
         setImpedanceError('Analyze a circuit first.');
@@ -775,9 +777,14 @@ async function computeImpedance() {
 
     els.computeImpedanceBtn.disabled = true;
     try {
-        const result = await Bridge.solveCircuit(circuit);
+        // Tagged 'impedance' (its own lane): rapid Z(s) clicks supersede each
+        // other, but never the main 'solve'. Seq-guarded like every other async
+        // result so a slow earlier Z(s) cannot overwrite a newer one.
+        const seq = ++impedanceSeq;
+        const result = await Bridge.solveCircuit(circuit, 'impedance');
+        if (seq !== impedanceSeq || result.superseded) return;
         if (result.cancelled) {
-            setImpedanceError('Cancelled.');
+            setImpedanceError('Cancelled — press Compute Z(s) again.');
             return;
         }
         if (!result.ok) {
@@ -957,15 +964,19 @@ els.importFile.addEventListener('change', handleImport);
 
 // --- UI Logic ---
 
+// One timer, cleared and reset on each error. Without this, the auto-hide from
+// an earlier error fires on its own schedule and dismisses a later one early.
+let globalErrorTimer = null;
 function showGlobalError(msg) {
     els.globalErrorText.textContent = msg;
     els.globalErrorBanner.classList.remove('hidden');
-    
-    // Auto-hide after 10s
-    setTimeout(hideGlobalError, 10000);
+    // Auto-hide after 10s, measured from THIS error.
+    clearTimeout(globalErrorTimer);
+    globalErrorTimer = setTimeout(hideGlobalError, 10000);
 }
 
 function hideGlobalError() {
+    clearTimeout(globalErrorTimer);
     els.globalErrorBanner.classList.add('hidden');
 }
 
@@ -1348,6 +1359,26 @@ function renderStandardSections(factors) {
     });
 }
 
+// The exact LaTeX of the H(s) currently on screen, for the "Copy TeX" button.
+// Set by renderTf on every (re)render so the copied source always matches the
+// displayed formula (flat, factored, or substituted).
+let lastTfTex = '';
+
+// Copy the displayed H(s) as LaTeX source. Pure text, no analysis -- available
+// whenever a result is on screen.
+els.copyTexBtn?.addEventListener('click', async () => {
+    if (!lastTfTex) return;
+    try {
+        await navigator.clipboard.writeText(lastTfTex);
+        const prev = els.copyTexBtn.textContent;
+        els.copyTexBtn.textContent = 'Copied!';
+        setTimeout(() => { els.copyTexBtn.textContent = prev; }, 1200);
+    } catch (e) {
+        showGlobalError('Could not copy the TeX: ' + e.message);
+    }
+    els.copyTexBtn.blur();
+});
+
 function renderTf(tf) {
     els.resultPlaceholder.classList.add('hidden');
     els.resultContainer.classList.remove('hidden');
@@ -1384,14 +1415,19 @@ function renderTf(tf) {
     // flat H(s) renders as the single fraction.
     if (factoredView && standardFormView) {
         renderStandardSections(disp.factors);
+        // The sections are rendered per-stage into the DOM; for "Copy TeX" give
+        // the product of the stage fractions, which is the same H(s).
+        lastTfTex = `H(s) = ${disp.latex}`;
     } else if (factoredView) {
         const stages = disp.factors.map((st, i) =>
             `H_{${i + 1}}(s) &= ${st.latex}`).join(' \\\\[4pt] ');
-        katex.render(`\\begin{aligned} ${stages} \\end{aligned}`, els.latexOutput, {
+        lastTfTex = `\\begin{aligned} ${stages} \\end{aligned}`;
+        katex.render(lastTfTex, els.latexOutput, {
             displayMode: true, throwOnError: false
         });
     } else {
-        katex.render(`H(s) = ${disp.latex}`, els.latexOutput, {
+        lastTfTex = `H(s) = ${disp.latex}`;
+        katex.render(lastTfTex, els.latexOutput, {
             displayMode: true, throwOnError: false
         });
     }
@@ -1740,6 +1776,10 @@ async function applySubstitution() {
 
     // Nothing entered: show the original symbolic transfer function.
     if (Object.keys(subsMap).length === 0) {
+        // Bump the sequence so a substitution still in flight (from the last
+        // non-empty field, before it was cleared) cannot resolve afterwards and
+        // paint its value back over the symbolic form just restored here.
+        subsSeq++;
         currentSubstitutedTf = currentTf;
         isFullyNumeric = (currentTf.symbols.length === 0);
         renderTf(currentTf);

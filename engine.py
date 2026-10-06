@@ -147,6 +147,42 @@ def _parse_value(token: str) -> Any:
     return Symbol(token, positive=True)
 
 
+# A value token that is purely numeric: an integer, decimal, or scientific
+# literal, or a rational "p/q" as produced by str(Rational). Only such tokens
+# are ever handed to sympify.
+_SAFE_NUMBER_RE = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?(?:/\d+)?$")
+
+
+def _safe_value(token: str) -> sp.Expr:
+    """Turn a stored value string into a SymPy expression WITHOUT evaluating it
+    as Python.
+
+    ``sp.sympify`` runs its argument through Python's expression evaluator, so a
+    crafted value token (e.g. one arriving in a shared-circuit link) could run
+    arbitrary code when the netlist is analysed. The schematic/netlist front-end
+    already restricts values to numbers and identifiers, but the engine must not
+    depend on that single check: every component/substitution value is routed
+    through here instead of ``sympify``. Numbers (including SI-prefixed ones) are
+    parsed exactly as before; anything else becomes a bare ``Symbol`` whose name
+    is the literal token -- never an evaluated expression.
+    """
+    token = str(token).strip()
+    # Pure number (incl. "p/q" from a round-tripped Rational): safe to sympify --
+    # there is no name or call for the evaluator to execute. Kept on sympify so
+    # the numeric result (Rational vs Float) is byte-for-byte what it always was.
+    if _SAFE_NUMBER_RE.match(token):
+        return sp.sympify(token)
+    # SI prefix, e.g. "10k", "4.7u" -- exact Rational * 10^n (see _parse_value).
+    m = _PREFIX_RE.match(token)
+    if m:
+        num_part, prefix = m.groups()
+        exponent = round(math.log10(_SI_PREFIXES[prefix]))
+        return sp.Rational(num_part) * sp.Integer(10) ** exponent
+    # Identifier or anything else: bind it as a symbol by name, never evaluate.
+    # Plain Symbol (no assumptions), matching the sympify path this replaces.
+    return Symbol(token)
+
+
 def _node_key(name: str) -> str:
     """Normalise ground aliases to '0'."""
     return "0" if name.upper() in ("0", "GND") else name
@@ -538,21 +574,21 @@ def _build_mna(elements: List[dict]) -> Tuple[
         if etype == "R":
             # ---- Resistor -------------------------------------------------
             # Y = 1/R
-            R_sym = sp.sympify(el["value"])
+            R_sym = _safe_value(el["value"])
             Y = 1 / R_sym
             stamp_admittance(el["n1"], el["n2"], Y)
 
         elif etype == "C":
             # ---- Capacitor ------------------------------------------------
             # Y = s * C
-            C_sym = sp.sympify(el["value"])
+            C_sym = _safe_value(el["value"])
             Y = s * C_sym
             stamp_admittance(el["n1"], el["n2"], Y)
 
         elif etype == "L":
             # ---- Inductor -------------------------------------------------
             # Y = 1 / (s * L)
-            L_sym = sp.sympify(el["value"])
+            L_sym = _safe_value(el["value"])
             Y = 1 / (s * L_sym)
             stamp_admittance(el["n1"], el["n2"], Y)
 
@@ -564,7 +600,7 @@ def _build_mna(elements: List[dict]) -> Tuple[
             # A[I_row][n+] += 1   — constraint: V(n+) coefficient
             # A[I_row][n-] -= 1   — constraint: V(n-) coefficient
             # z[I_row] = Vs       — V(n+) - V(n-) = Vs
-            Vs = sp.sympify(el["value"])
+            Vs = _safe_value(el["value"])
             np_i = ni(el["n1"])
             nn_i = ni(el["n2"])
             i_col = branch_idx[el["name"]]
@@ -583,7 +619,7 @@ def _build_mna(elements: List[dict]) -> Tuple[
             # No branch variable. Current enters n+.
             # z[n+] += Is  — current enters n+
             # z[n-] -= Is  — current leaves n-
-            Is = sp.sympify(el["value"])
+            Is = _safe_value(el["value"])
             np_i = ni(el["n1"])
             nn_i = ni(el["n2"])
             if np_i is not None:
@@ -597,7 +633,7 @@ def _build_mna(elements: List[dict]) -> Tuple[
             # (current leaves n+, enters n-)
             # A[n+][nc+] += gm;  A[n+][nc-] -= gm
             # A[n-][nc+] -= gm;  A[n-][nc-] += gm
-            gm = sp.sympify(el["value"])
+            gm = _safe_value(el["value"])
             np_i = ni(el["np"])
             nn_i = ni(el["nn"])
             ncp_i = ni(el["ncp"])
@@ -620,7 +656,7 @@ def _build_mna(elements: List[dict]) -> Tuple[
             # A[n+][I_col] += 1;  A[n-][I_col] -= 1    — KCL
             # A[I_row][n+] += 1;  A[I_row][n-] -= 1    — V(n+)-V(n-)
             # A[I_row][nc+] -= Av; A[I_row][nc-] += Av  — -Av*(V(nc+)-V(nc-))
-            Av = sp.sympify(el["value"])
+            Av = _safe_value(el["value"])
             np_i = ni(el["np"])
             nn_i = ni(el["nn"])
             ncp_i = ni(el["ncp"])
@@ -665,8 +701,8 @@ def _build_mna(elements: List[dict]) -> Tuple[
                 A[nout_i, i_col] += 1
 
             if "a0" in el and "gbw" in el:
-                A0 = sp.sympify(el["a0"])
-                GBW = sp.sympify(el["gbw"])
+                A0 = _safe_value(el["a0"])
+                GBW = _safe_value(el["gbw"])
                 A_s = A0 / (1 + s * A0 / (2 * sp.pi * GBW))
                 if nout_i is not None:
                     A[i_row, nout_i] += 1
@@ -694,9 +730,9 @@ def _build_mna(elements: List[dict]) -> Tuple[
             # is the winding polarity (SPICE's own convention for a coupling
             # coefficient), so a reversed secondary is just a negative k,
             # not a separate stamp.
-            L1 = sp.sympify(el["l1"])
-            L2 = sp.sympify(el["l2"])
-            k_coup = sp.sympify(el["k"])
+            L1 = _safe_value(el["l1"])
+            L2 = _safe_value(el["l2"])
+            k_coup = _safe_value(el["k"])
             M = k_coup * sp.sqrt(L1 * L2)
 
             n1_i = ni(el["n1"])
@@ -1695,7 +1731,8 @@ def _value_subs_map(A: sp.Matrix, z_tf: sp.Matrix, values: Dict[str, Any]) -> Di
         try:
             r = sp.Rational(str(val))
         except (ValueError, TypeError):
-            r = sp.sympify(str(val))
+            # Not a plain rational (e.g. "1e-9"): parse safely, never eval.
+            r = _safe_value(str(val))
         if name in present:
             subs[present[name]] = r
         else:
@@ -2022,12 +2059,15 @@ def substitute(tf_json: str, subs_map_json: str) -> str:
         expr_syms = {str(sym): sym for sym in H_expr.free_symbols}
         sub_dict: Dict[Symbol, sp.Expr] = {}
         for name, val in subs_map.items():
+            # _safe_value, not sympify: a substitution value is user-typed free
+            # text, so it must not reach Python's expression evaluator either.
+            parsed = _safe_value(str(val))
             if name in expr_syms:
-                sub_dict[expr_syms[name]] = sp.sympify(str(val))
+                sub_dict[expr_syms[name]] = parsed
             else:
                 # Symbol not in expression — try both with and without assumptions
-                sub_dict[Symbol(name)] = sp.sympify(str(val))
-                sub_dict[Symbol(name, positive=True)] = sp.sympify(str(val))
+                sub_dict[Symbol(name)] = parsed
+                sub_dict[Symbol(name, positive=True)] = parsed
 
         # xreplace, not subs: substituting a symbol with a constant is a pure
         # structural replacement, and xreplace does exactly that -- while subs
