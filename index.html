@@ -22,7 +22,7 @@
     <script src="https://unpkg.com/konva@9.3.6/konva.min.js"></script>
 
     <!-- Custom CSS -->
-    <link rel="stylesheet" href="style.css?v=15">
+    <link rel="stylesheet" href="style.css?v=16">
 </head>
 <body>
 
@@ -49,6 +49,14 @@
                         <span class="engine-dot"></span>
                         <span id="engine-status-text">Loading SymPy…</span>
                     </div>
+                    <!-- Explicit run: re-derives H(s), re-applies the values and
+                         re-plots. Auto (on by default) keeps doing that on every
+                         edit; turn it off for circuits whose solve is slow. -->
+                    <button id="analyze-btn" class="primary-btn small-btn" disabled
+                            title="Recompute H(s), the values and the plot now">▶ Analyze</button>
+                    <label class="auto-toggle" title="Re-analyze automatically on every circuit, port or value change">
+                        <input type="checkbox" id="auto-analyze-toggle" checked> Auto
+                    </label>
                     <!-- Visible only while the engine worker is computing.
                          Terminates the worker and restarts it, so a runaway
                          symbolic solve cannot hold the session hostage. -->
@@ -87,7 +95,9 @@
                        combination, not as a transistor.</p>
                     <p>Draw a circuit (or load an Example) and drop a <b>Netname</b> label on the
                        input and output nodes. Pick them in Port Configuration and H(s) appears
-                       automatically -- there is no Analyze button, every edit re-solves.</p>
+                       automatically -- every edit re-solves. For a slow circuit, untick
+                       <b>Auto</b> in the header and press <b>▶ Analyze</b> when ready; after a
+                       <b>Cancel</b>, Analyze also re-runs what was stopped.</p>
                 </section>
                 <section>
                     <h4>Schematic editor</h4>
@@ -233,9 +243,10 @@
                             <select id="output-node"></select>
                         </div>
                     </div>
-                    <!-- No Analyze button: analysis runs automatically -- on
-                         load, on every edit, and on port changes. Problems
-                         surface here instead. -->
+                    <!-- Analysis runs automatically (on load, on every edit, on
+                         port changes) unless Auto is off in the header, and
+                         always on the header's Analyze button. Problems surface
+                         here. -->
                     <div id="parse-error-box" class="error-box hidden" style="margin-top: 0.75rem;"></div>
 
                     <!-- Driving-point impedance at any node: a separate,
@@ -261,6 +272,7 @@
                 <!-- H(s) is the answer the user came for, so it stays put rather
                      than hiding behind a tab. -->
                 <div class="tf-banner">
+                    <div id="stale-note" class="stale-note hidden"></div>
                     <div id="result-placeholder" class="placeholder-text">
                         Draw a circuit and press Analyze
                     </div>
@@ -359,6 +371,7 @@
                                     </div>
                                 </div>
 
+                                <div id="plot-error" class="error-box hidden"></div>
                                 <div class="plots-wrapper">
                                     <div id="bode-plots" class="plot-area">
                                         <div id="bode-readout" class="plot-readout">Hover a plot to read values</div>
@@ -577,10 +590,10 @@
     <!-- App Logic -->
     <!-- Order matters: app.js drives the editor, so schematic.js must have
          registered its DOMContentLoaded handler first. -->
-    <script src="pyodide_bridge.js?v=7"></script>
+    <script src="pyodide_bridge.js?v=8"></script>
     <script src="samples.js?v=6"></script>
     <script src="netlist.js?v=7"></script>
     <script src="schematic.js?v=10"></script>
-    <script src="app.js?v=23"></script>
+    <script src="app.js?v=24"></script>
 </body>
 </html>
